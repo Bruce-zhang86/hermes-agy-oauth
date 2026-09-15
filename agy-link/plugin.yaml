@@ -1,0 +1,6 @@
+# D:\hermes\plugins\agy-link\plugin.yaml
+name: agy-link
+version: 0.1.0
+description: "Google Antigravity 订阅模型接入：OAuth 登录、号池、/agy 命令"
+author: "community"
+kind: standalone

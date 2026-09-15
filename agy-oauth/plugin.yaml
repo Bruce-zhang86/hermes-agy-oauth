@@ -1,0 +1,5 @@
+name: agy-oauth
+kind: model-provider
+version: 0.1.0
+description: "Google Antigravity 订阅模型（Gemini / Claude / GPT-OSS）— 通过 agy-link 号池 OAuth"
+author: "community"

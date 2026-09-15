@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+*.egg-info/
+.DS_Store
+Thumbs.db
+# 绝不提交账号或 OAuth token
+agy-accounts/
+**/antigravity-oauth-token
+**/.gemini/
+pending-auth.json
