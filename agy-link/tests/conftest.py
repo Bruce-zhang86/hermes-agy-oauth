@@ -49,6 +49,16 @@ def _clear_transport_signature_cache():
     clear_thought_signature_cache()
 
 
+@pytest.fixture(autouse=True)
+def _clear_last_good_host():
+    """每个用例前后清空 Cloud Code 主机粘滞，避免用例间串扰。"""
+    from agylink.client import clear_last_good_host
+
+    clear_last_good_host()
+    yield
+    clear_last_good_host()
+
+
 @pytest.fixture
 def accounts_root(tmp_path, monkeypatch) -> Path:
     """把号池目录指向 tmp_path/agy-accounts 并返回该路径。"""

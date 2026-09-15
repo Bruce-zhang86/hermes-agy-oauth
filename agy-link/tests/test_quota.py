@@ -52,6 +52,20 @@ def test_model_ids_from_available_and_fallback():
     assert "gemini-3.6-flash" in ids and "claude-sonnet-4-6" in ids and "gpt-oss-120b-medium" in ids
 
 
+def test_preferred_hosts_puts_last_good_first():
+    """上次成功的 Cloud Code 主机排到最前，其余保持原顺序。"""
+    hosts = (
+        "https://daily-cloudcode-pa.googleapis.com",
+        "https://cloudcode-pa.googleapis.com",
+    )
+    assert Q.preferred_hosts(None, hosts=hosts) == hosts
+    assert Q.preferred_hosts("https://cloudcode-pa.googleapis.com", hosts=hosts) == (
+        "https://cloudcode-pa.googleapis.com",
+        "https://daily-cloudcode-pa.googleapis.com",
+    )
+    assert Q.preferred_hosts("https://unknown.example", hosts=hosts) == hosts
+
+
 def test_family_quotas_from_summary_and_models():
     summary = {"groups": [
         {"displayName": "Gemini", "description": "Gemini Flash, Gemini Pro",

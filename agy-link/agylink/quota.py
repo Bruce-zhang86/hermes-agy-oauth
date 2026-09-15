@@ -16,6 +16,21 @@ HOSTS: tuple[str, ...] = (
     "https://cloudcode-pa.googleapis.com",
 )
 
+
+def preferred_hosts(last_good: Optional[str] = None, *, hosts: Optional[tuple[str, ...]] = None) -> tuple[str, ...]:
+    """把上次成功的 Cloud Code 主机排到最前，其余保持原顺序。
+
+    Gemini 隐式缓存不跨主机；工具循环里每次都先打 daily 再打 prod，会把
+    已经热起来的前缀缓存打散。粘滞到上次成功的主机，后续轮次更容易命中。
+    参数 last_good：上次 streamGenerateContent 成功的完整主机 URL。
+    参数 hosts：候选主机元组；默认使用模块常量 HOSTS。
+    返回：重排后的主机 URL 元组；last_good 未知或不在列表里时返回原顺序。
+    """
+    ordered = hosts if hosts is not None else HOSTS
+    if last_good and last_good in ordered:
+        return (last_good,) + tuple(host for host in ordered if host != last_good)
+    return tuple(ordered)
+
 FALLBACK_MODELS: dict[str, tuple[str, ...]] = {
     "google": ("gemini-3.6-flash", "gemini-3.1-pro-high", "gemini-3-flash"),
     "anthropic": ("claude-sonnet-4-6", "claude-opus-4-6-thinking"),

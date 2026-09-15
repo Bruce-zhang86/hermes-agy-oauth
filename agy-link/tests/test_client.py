@@ -350,6 +350,34 @@ def test_429_with_reset_time_does_not_wait(accounts_root):
     assert store.load().accounts[0].cooldowns["google"]["untilMs"] > cl._now_ms()
 
 
+def test_stream_prefers_last_successful_host(accounts_root):
+    """隐式缓存不跨主机：第一次在第二台成功后，后续请求先打同一台。"""
+    store = _seed(accounts_root, [1])
+    stream_hosts = []
+    C.clear_last_good_host()
+
+    def handler(req):
+        if req.url.path.endswith("loadCodeAssist"):
+            return httpx.Response(200, json={"cloudaicompanionProject": "p"})
+        if "streamGenerateContent" not in str(req.url):
+            return httpx.Response(404, text="not stream")
+        stream_hosts.append(req.url.host)
+        if req.url.host == "daily-cloudcode-pa.googleapis.com":
+            return httpx.Response(500, text="daily unavailable")
+        return _ok_text("from-prod")
+
+    cl = C.AgyOAuthClient(store=store, http_factory=lambda proxy: httpx.Client(transport=httpx.MockTransport(handler)))
+    first = cl.chat.completions.create(model="gemini-3-flash", messages=[{"role": "user", "content": "x"}])
+    second = cl.chat.completions.create(model="gemini-3-flash", messages=[{"role": "user", "content": "y"}])
+    assert first.choices[0].message.content == "from-prod"
+    assert second.choices[0].message.content == "from-prod"
+    assert stream_hosts == [
+        "daily-cloudcode-pa.googleapis.com",
+        "cloudcode-pa.googleapis.com",
+        "cloudcode-pa.googleapis.com",
+    ]
+
+
 def test_other_4xx_does_not_try_second_host(accounts_root):
     store = _seed(accounts_root, [1])
     stream_hits = []

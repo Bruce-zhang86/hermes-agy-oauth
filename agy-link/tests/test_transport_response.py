@@ -26,7 +26,13 @@ def test_accumulate_text_thought_and_function_call():
     assert acc.text == "Hello" and acc.reasoning == "thinking..."
     assert acc.tool_calls == [{"id": "call_fc1|SIG", "name": "terminal", "arguments": "{\"cmd\": \"ls\"}"}]
     assert acc.finish_reason == "tool_calls"
-    assert acc.usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "reasoning_tokens": 3}
+    assert acc.usage == {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "reasoning_tokens": 3,
+        "cached_tokens": 0,
+    }
 
 
 def test_finish_reason_mapping_without_tools():
@@ -49,6 +55,53 @@ def test_to_completion_shape():
     assert msg.content == "hi" and msg.reasoning_content == "r"
     assert msg.tool_calls[0].id == "call_a|b" and msg.tool_calls[0].function.name == "f"
     assert c.choices[0].finish_reason == "tool_calls" and c.usage.total_tokens == 3 and c.model == "gemini-3-flash"
+    assert c.usage.prompt_tokens_details.cached_tokens == 0
+
+
+def test_accumulate_maps_gemini_cached_content_token_count():
+    """Cloud Code usageMetadata.cachedContentTokenCount 必须进入 Hermes cached_tokens。"""
+    acc = T.accumulate([{
+        "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+        "usageMetadata": {
+            "promptTokenCount": 1000,
+            "candidatesTokenCount": 20,
+            "totalTokenCount": 1020,
+            "cachedContentTokenCount": 880,
+        },
+    }])
+    assert acc.usage["cached_tokens"] == 880
+    assert T.to_completion(acc, model="gemini-3.8-flash-tiered").usage.prompt_tokens_details.cached_tokens == 880
+
+
+def test_accumulate_maps_cache_tokens_details_when_count_missing():
+    """无 cachedContentTokenCount 时，累加 cacheTokensDetails.tokenCount。"""
+    acc = T.accumulate([{
+        "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+        "usageMetadata": {
+            "promptTokenCount": 500,
+            "candidatesTokenCount": 10,
+            "totalTokenCount": 510,
+            "cacheTokensDetails": [
+                {"modality": "TEXT", "tokenCount": 200},
+                {"modality": "TEXT", "tokenCount": 50},
+            ],
+        },
+    }])
+    assert acc.usage["cached_tokens"] == 250
+
+
+def test_accumulate_maps_anthropic_style_cache_read_field():
+    """Cloud Code 转发 Claude 时可能用 cacheReadInputTokenCount。"""
+    acc = T.accumulate([{
+        "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+        "usageMetadata": {
+            "promptTokenCount": 400,
+            "candidatesTokenCount": 8,
+            "totalTokenCount": 408,
+            "cacheReadInputTokenCount": 310,
+        },
+    }])
+    assert acc.usage["cached_tokens"] == 310
 
 
 def test_upstream_error_classification():

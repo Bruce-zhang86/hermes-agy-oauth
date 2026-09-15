@@ -70,7 +70,7 @@ hermes -m gemini-3-flash --provider agy-oauth
 /model --provider agy-oauth gemini-3-flash
 ```
 
-模型 ID 必须用 `hermes agy models` 打出来的 **Cloud Code 名称**（例如 `gemini-3.8-flash-tiered`），不要用 OpenRouter 短名（`gemini-3.8-flash` 会 404）。
+模型 ID 必须用 `hermes agy models` 打出来的 **Cloud Code 名称**（例如 `gemini-3.8-flash-tiered`、`claude-sonnet-4-6`），不要用 OpenRouter 短名（`gemini-3.8-flash`、`claude-sonnet-5` 会 404）。
 
 ## 测试
 

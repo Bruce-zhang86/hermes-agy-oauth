@@ -170,6 +170,24 @@ def decode_tool_call_id(tool_call_id: str) -> tuple[str, str]:
     return "", ""
 
 
+def resolve_function_call_id(tool_call_id: str) -> tuple[str, str]:
+    """得到 Cloud Code functionCall.id（Claude 必填）与 thoughtSignature。
+
+    decode_tool_call_id 只认我们自己编的 call_<id>|<sig>。Hermes/Grok 历史里常见
+    call-<uuid>-N（连字符），按旧逻辑会丢掉 id，Cloud Code 转 Claude 就 400：
+    ``tool_use.id: Field required``。认不出我们的编码时，原样保留 tool_call.id。
+    参数 tool_call_id：OpenAI / Hermes 的 tool_call.id 或 tool_call_id。
+    返回：(functionCall.id, thoughtSignature)；id 在完全为空时生成一个 call_ 前缀值。
+    """
+    fc_id, signature = decode_tool_call_id(tool_call_id)
+    if fc_id:
+        return fc_id, signature
+    raw = str(tool_call_id or "").split("|", 1)[0].strip()
+    if raw:
+        return raw, signature
+    return f"call_{uuid.uuid4().hex[:24]}", signature
+
+
 def request_headers(access_token: str) -> dict[str, str]:
     """构造 Cloud Code 推理请求头。
 
@@ -376,7 +394,9 @@ def _function_declarations(tools: Optional[list[dict]], family: Optional[str]) -
 
     参数 tools：OpenAI 格式的 tools 列表，可为 None。
     参数 family：模型族，用于 schema 清洗策略。
-    返回：Gemini functionDeclaration 字典列表。
+    返回：按 name 排序后的 Gemini functionDeclaration 字典列表。
+    排序原因：Gemini 隐式缓存要求 tools 前缀字节稳定；Hermes 的 tool_search
+    可能打乱可见工具顺序，按 name 排序后同一集合会得到同一前缀。
     """
     decls = []
     for t in tools or []:
@@ -391,6 +411,7 @@ def _function_declarations(tools: Optional[list[dict]], family: Optional[str]) -
             _clean_schema(params, family) if isinstance(params, dict) else {"type": "object", "properties": {}}
         )
         decls.append(d)
+    decls.sort(key=lambda item: str(item.get("name") or ""))
     return decls
 
 
@@ -453,7 +474,7 @@ def _contents_of(messages: list[dict]) -> tuple[list[dict], str]:
             continue
         if role == "tool":
             call_id = str(msg.get("tool_call_id") or "")
-            fc_id, _ = decode_tool_call_id(call_id)
+            fc_id, _ = resolve_function_call_id(call_id)
             text = _text_of(msg.get("content"))
             try:
                 parsed = json.loads(text) if text else {}
@@ -478,7 +499,7 @@ def _contents_of(messages: list[dict]) -> tuple[list[dict], str]:
                 except ValueError:
                     args = {"_raw": fn.get("arguments")}
                 tool_id = str(tc.get("id") or "")
-                fc_id, sig = decode_tool_call_id(tool_id)
+                fc_id, sig = resolve_function_call_id(tool_id)
                 name_by_call_id[tool_id] = fn.get("name") or ""
                 fc = {"name": fn.get("name"), "args": args if isinstance(args, dict) else {"_raw": args}}
                 if fc_id:
@@ -647,8 +668,53 @@ class Accumulated:
             "completion_tokens": 0,
             "total_tokens": 0,
             "reasoning_tokens": 0,
+            "cached_tokens": 0,
         }
     )
+
+
+def _nonneg_int(value: Any) -> int:
+    """把任意值尽量转成非负整数。
+
+    参数 value：usageMetadata 里的计数字段（可能是 int、str 或无效值）。
+    返回：成功时的非负整数；无法转换或为负数时返回 0。
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def cached_tokens_from_usage_metadata(usage_metadata: Optional[dict]) -> int:
+    """从 Cloud Code / Gemini usageMetadata 提取隐式缓存命中 token 数。
+
+    Gemini 官方字段是 cachedContentTokenCount；部分 Cloud Code 转发还会给
+    cacheReadInputTokenCount（Claude 风格）或 cacheTokensDetails 明细。
+    参数 usage_metadata：SSE 事件里的 usageMetadata 字典，允许 None。
+    返回：缓存命中 token 数；没有任何可识别字段时返回 0。
+    """
+    if not isinstance(usage_metadata, dict):
+        return 0
+    for key in (
+        "cachedContentTokenCount",
+        "cached_content_token_count",
+        "cacheReadInputTokenCount",
+        "cache_read_input_tokens",
+        "cachedTokens",
+        "cached_tokens",
+    ):
+        count = _nonneg_int(usage_metadata.get(key))
+        if count:
+            return count
+    details = usage_metadata.get("cacheTokensDetails") or usage_metadata.get("cache_tokens_details")
+    if not isinstance(details, list):
+        return 0
+    total = 0
+    for item in details:
+        if isinstance(item, dict):
+            total += _nonneg_int(item.get("tokenCount") or item.get("token_count"))
+    return total
 
 
 def accumulate(events: Iterable[dict]) -> Accumulated:
@@ -689,11 +755,14 @@ def accumulate(events: Iterable[dict]) -> Accumulated:
                 raw_finish = str(cand["finishReason"]).upper()
         um = ev.get("usageMetadata")
         if isinstance(um, dict):
+            # 后续 SSE 分片可能只带部分 usage、漏掉缓存字段；已读到的 cached_tokens 要保留。
+            cached_tokens = cached_tokens_from_usage_metadata(um) or int(acc.usage.get("cached_tokens") or 0)
             acc.usage = {
                 "prompt_tokens": int(um.get("promptTokenCount") or 0),
                 "completion_tokens": int(um.get("candidatesTokenCount") or um.get("completionTokenCount") or 0),
                 "total_tokens": int(um.get("totalTokenCount") or 0),
                 "reasoning_tokens": int(um.get("thoughtsTokenCount") or 0),
+                "cached_tokens": cached_tokens,
             }
     if acc.tool_calls:
         acc.finish_reason = "tool_calls"
@@ -730,7 +799,7 @@ def to_completion(acc: Accumulated, *, model: str) -> SimpleNamespace:
         prompt_tokens=acc.usage["prompt_tokens"],
         completion_tokens=acc.usage["completion_tokens"],
         total_tokens=acc.usage["total_tokens"],
-        prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+        prompt_tokens_details=SimpleNamespace(cached_tokens=int(acc.usage.get("cached_tokens") or 0)),
         completion_tokens_details=SimpleNamespace(reasoning_tokens=acc.usage.get("reasoning_tokens", 0)),
     )
     message = SimpleNamespace(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ from agent.acp_openai_bridge import completion_to_stream_chunks
 from agylink import pool as P
 from agylink.oauth import InvalidGrant, OAuthError, refresh_access_token
 from agylink.paths import pool_file
-from agylink.quota import HOSTS, post_internal
+from agylink.quota import post_internal, preferred_hosts
 from agylink.redact import redact
 from agylink.token_store import is_expiring, read_token, write_token
 from agylink.transport import (
@@ -32,6 +33,45 @@ from agylink.transport import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 进程级粘滞：Hermes 可能在重试/换客户端时新建 AgyOAuthClient，
+# 实例字段扛不住；隐式缓存必须打到同一台 Cloud Code 主机才容易命中。
+_LAST_GOOD_HOST: Optional[str] = None
+_LAST_GOOD_HOST_LOCK = threading.Lock()
+
+
+def last_good_host() -> Optional[str]:
+    """读取进程内上次 streamGenerateContent 成功的主机。
+
+    参数：无。
+    返回：完整主机 URL；尚未成功过则 None。
+    """
+    with _LAST_GOOD_HOST_LOCK:
+        return _LAST_GOOD_HOST
+
+
+def remember_good_host(host: str) -> None:
+    """记录进程内上次成功的 Cloud Code 主机。
+
+    参数 host：完整主机 URL（含 https://）。
+    返回：无。
+    """
+    global _LAST_GOOD_HOST
+    if not host:
+        return
+    with _LAST_GOOD_HOST_LOCK:
+        _LAST_GOOD_HOST = host
+
+
+def clear_last_good_host() -> None:
+    """清空主机粘滞（测试用，避免用例间串扰）。
+
+    参数：无。
+    返回：无。
+    """
+    global _LAST_GOOD_HOST
+    with _LAST_GOOD_HOST_LOCK:
+        _LAST_GOOD_HOST = None
 
 _AUTH_HINT = (
     "没有可用的 Antigravity 账号。先运行 `hermes agy auth` 登录，"
@@ -195,13 +235,14 @@ class AgyOAuthClient:
     ):
         """依次请求生产主机并累积一次 Cloud Code SSE 响应。
 
+        优先打上次成功的主机，降低 Gemini 隐式缓存被双主机打散的概率。
         参数 envelope：Cloud Code 请求信封。
         参数 token：OAuth access token。
         参数 http：当前账号对应的客户端。
         返回：transport.Accumulated 响应累积结果。
         """
         last: Optional[UpstreamError] = None
-        for host in HOSTS:
+        for host in preferred_hosts(last_good_host()):
             url = f"{host}/v1internal:streamGenerateContent?alt=sse"
             try:
                 with http.stream(
@@ -217,6 +258,7 @@ class AgyOAuthClient:
                             raise error
                         last = error
                         continue
+                    remember_good_host(host)
                     return accumulate(iter_sse_events(response.iter_lines()))
             except httpx.HTTPError as exc:
                 message = redact(str(exc))

@@ -13,6 +13,34 @@ def test_tool_call_id_roundtrip():
     assert T.decode_tool_call_id("weird") == ("", "")
 
 
+def test_hyphen_call_ids_are_kept_for_claude_tool_use():
+    """Grok/Hermes 的 call-<uuid>-N 必须原样写入 functionCall/functionResponse.id。
+
+    decode_tool_call_id 只认 call_ 下划线；丢掉 id 后 Cloud Code 转 Claude 会 400：
+    messages.N.content.M.tool_use.id: Field required。
+    """
+    grok_id = "call-bd941fb3-ba79-4b12-945b-4eedc81c086b-268"
+    env = T.build_envelope(
+        project_id="p",
+        model="claude-sonnet-4-6",
+        messages=[
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "先核对", "tool_calls": [
+                {"id": grok_id, "type": "function",
+                 "function": {"name": "skill_view", "arguments": "{\"name\":\"ops\"}"}}]},
+            {"role": "tool", "tool_call_id": grok_id, "name": "skill_view",
+             "content": "{\"ok\": true}"},
+        ],
+        tools=[{"type": "function", "function": {"name": "skill_view",
+                "parameters": {"type": "object", "properties": {}}}}],
+        tool_choice="auto",
+        reasoning_effort=None,
+    )
+    contents = env["request"]["contents"]
+    assert contents[1]["parts"][1]["functionCall"]["id"] == grok_id
+    assert contents[2]["parts"][0]["functionResponse"]["id"] == grok_id
+
+
 def test_headers(monkeypatch):
     monkeypatch.delenv("HERMES_AGY_USER_AGENT", raising=False)
     h = T.request_headers("ya29.t")
@@ -43,6 +71,25 @@ def test_envelope_default_system_when_missing():
     env = T.build_envelope(project_id="p", model="gemini-3-flash", messages=[{"role": "user", "content": "x"}],
                            tools=None, tool_choice=None, reasoning_effort=None)
     assert env["request"]["systemInstruction"]["parts"][0]["text"] == "You are a helpful AI assistant."
+
+
+def test_function_declarations_are_sorted_by_name():
+    """工具声明按 name 排序，避免 Hermes 打乱顺序后打散 Gemini 隐式缓存前缀。"""
+    tools = [
+        {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "read_file", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "terminal", "parameters": {"type": "object", "properties": {}}}},
+    ]
+    env = T.build_envelope(
+        project_id="p",
+        model="gemini-3-flash",
+        messages=[{"role": "user", "content": "x"}],
+        tools=tools,
+        tool_choice="auto",
+        reasoning_effort=None,
+    )
+    names = [d["name"] for d in env["request"]["tools"][0]["functionDeclarations"]]
+    assert names == ["read_file", "terminal", "write_file"]
 
 
 def test_tools_and_tool_roundtrip_with_signature():
